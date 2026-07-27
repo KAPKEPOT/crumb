@@ -1,3 +1,5 @@
+mod binance_client;
+
 use anyhow::{anyhow, Result};
 use dotenvy::dotenv;
 use reqwest::Client;
@@ -258,6 +260,15 @@ impl TradingBot {
         info!("Real balance - {}: {:.2}", asset, balance);
         Ok(balance)
     }
+    
+    async fn get_current_btc_price(&self) -> Result<f64> {
+        let klines = self.get_klines("BTCUSDT").await?;
+        if let Some(last_kline) = klines.last() {
+            Ok(last_kline.close)
+        } else {
+            Err(anyhow!("No kline data available for BTC price"))
+        }
+    }
 
     // ============ STRATEGY METHODS ============
 
@@ -495,7 +506,7 @@ Amount: {:.8} BTC
 Spent: {:.2} USDT
 Price: ${:.2}
 Order ID: {}
-⚠️ This is a REAL trade on the exchange!"#
+⚠️ This is a REAL trade on the exchange!"#,
             self.symbol,
             btc_amount,
             amount,
