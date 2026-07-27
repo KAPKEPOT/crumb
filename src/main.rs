@@ -1,4 +1,5 @@
 mod binance_client;
+mod strategy;
 
 use anyhow::{anyhow, Result};
 use dotenvy::dotenv;
@@ -331,33 +332,35 @@ impl TradingBot {
     }
 
     async fn analyze_strategy(&self) -> Result<TradingSignal> {
-        // Get market data
         let klines = self.get_klines(&self.symbol).await?;
-        let close_prices: Vec<f64> = klines.iter().map(|k| k.close).collect();
-
-        // Calculate RSI
-        let rsi_values = Self::calculate_rsi(&close_prices, self.config.rsi_period)?;
-        let current_rsi = rsi_values.last().copied().ok_or_else(|| anyhow!("No RSI values calculated"))?;
-        let current_price = close_prices.last().copied().ok_or_else(|| anyhow!("No price data"))?;
-
-        let action = if current_rsi < self.config.rsi_oversold {
-            Action::Buy
-        } else if current_rsi > self.config.rsi_overbought {
-            Action::Sell
-        } else {
-            Action::Hold
+        
+        // Convert to strategy module format
+        let kline_data: Vec<strategy::KlineData> = klines
+            .iter()
+            .map(|k| strategy::KlineData {
+                open: k.open,
+                high: k.high,
+                low: k.low,
+                close: k.close,
+                volume: k.volume,
+            })
+            .collect();
+            
+        let config = strategy::StrategyConfig::default();
+        let enhanced_signal = strategy::StrategyAnalyzer::analyze(&kline_data, &config)?;
+        
+        let action = match enhanced_signal.signal {
+            strategy::StrategySignal::StrongBuy => Action::Buy,
+            strategy::StrategySignal::Buy => Action::Buy,
+            strategy::StrategySignal::Sell => Action::Sell,
+            strategy::StrategySignal::StrongSell => Action::Sell,
+            strategy::StrategySignal::Hold => Action::Hold,
         };
-
-        info!(
-            "Market Analysis - Symbol: {}, Price: ${:.2}, RSI: {:.2}, Action: {:?}",
-            self.symbol, current_price, current_rsi, action
-        );
-
         Ok(TradingSignal {
             symbol: self.symbol.clone(),
             action,
-            price: current_price,
-            rsi: current_rsi,
+            price: enhanced_signal.entry_price,
+            rsi: enhanced_signal.indicators.rsi,
             timestamp: chrono::Utc::now().timestamp(),
         })
     }
