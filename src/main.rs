@@ -1,0 +1,708 @@
+use anyhow::{anyhow, Result};
+use dotenvy::dotenv;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+use teloxide::prelude::*;
+use teloxide::utils::command::BotCommands;
+use tracing::{error, info, warn};
+
+// ============ CONFIGURATION ============
+
+#[derive(Debug, Clone)]
+struct Config {
+    rsi_period: usize,
+    rsi_oversold: f64,
+    rsi_overbought: f64,
+    kline_limit: usize,
+    request_timeout_secs: u64,
+    rate_limit_secs: u64,
+}
+
+impl Config {
+    fn from_env() -> Result<Self> {
+        Ok(Self {
+            rsi_period: std::env::var("RSI_PERIOD")
+                .unwrap_or_else(|_| "14".to_string())
+                .parse()
+                .unwrap_or(14),
+            rsi_oversold: std::env::var("RSI_OVERSOLD")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .unwrap_or(30.0),
+            rsi_overbought: std::env::var("RSI_OVERBOUGHT")
+                .unwrap_or_else(|_| "70".to_string())
+                .parse()
+                .unwrap_or(70.0),
+            kline_limit: std::env::var("KLINE_LIMIT")
+                .unwrap_or_else(|_| "50".to_string())
+                .parse()
+                .unwrap_or(50),
+            request_timeout_secs: std::env::var("REQUEST_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
+            rate_limit_secs: std::env::var("RATE_LIMIT_SECS")
+                .unwrap_or_else(|_| "2".to_string())
+                .parse()
+                .unwrap_or(2),
+        })
+    }
+}
+
+// ============ DATA STRUCTURES ============
+
+#[derive(Debug, Deserialize)]
+struct BinanceKlineResponse(Vec<Vec<serde_json::Value>>);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BinanceKline {
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Action {
+    Buy,
+    Sell,
+    Hold,
+}
+
+#[derive(Debug, Clone)]
+struct TradingSignal {
+    symbol: String,
+    action: Action,
+    price: f64,
+    rsi: f64,
+    timestamp: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Position {
+    symbol: String,
+    amount: f64,
+    entry_price: f64,
+    timestamp: i64,
+}
+
+// ============ TELEGRAM COMMANDS ============
+
+#[derive(BotCommands, Clone)]
+#[command(rename_rule = "lowercase")]
+enum Command {
+    Start,
+    Balance,
+    Positions,
+    Analyze,
+    Buy { amount: f64 },
+    Sell { amount: f64 },
+    Status,
+    Help,
+}
+
+// ============ RATE LIMITER ============
+
+#[derive(Clone)]
+struct RateLimiter {
+    limits: Arc<tokio::sync::Mutex<HashMap<u64, SystemTime>>>,
+    cooldown: Duration,
+}
+
+impl RateLimiter {
+    fn new(cooldown_secs: u64) -> Self {
+        Self {
+            limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            cooldown: Duration::from_secs(cooldown_secs),
+        }
+    }
+
+    async fn check(&self, user_id: u64) -> Result<()> {
+        let mut limits = self.limits.lock().await;
+        
+        if let Some(last_request) = limits.get(&user_id) {
+            if last_request.elapsed().unwrap_or(Duration::from_secs(0)) < self.cooldown {
+                return Err(anyhow!(
+                    "Rate limit exceeded. Please wait {} seconds.",
+                    self.cooldown.as_secs()
+                ));
+            }
+        }
+        
+        limits.insert(user_id, SystemTime::now());
+        Ok(())
+    }
+}
+
+// ============ MAIN BOT STRUCTURE ============
+
+struct TradingBot {
+    binance_client: Client,
+    telegram_bot: Bot,
+    user_id: u64,
+    symbol: String,
+    position_size: f64,
+    config: Config,
+    rate_limiter: RateLimiter,
+    positions: Arc<tokio::sync::Mutex<Vec<Position>>>,
+}
+
+impl TradingBot {
+    async fn new(bot: Bot) -> Result<Self> {
+        dotenv().ok();
+
+        let config = Config::from_env()?;
+        let telegram_token = std::env::var("TELEGRAM_BOT_TOKEN")?;
+        let user_id = std::env::var("TELEGRAM_USER_ID")?
+            .parse::<u64>()
+            .map_err(|_| anyhow!("Invalid TELEGRAM_USER_ID format"))?;
+        let symbol = std::env::var("TRADING_SYMBOL")?;
+        let position_size = std::env::var("POSITION_SIZE")?
+            .parse::<f64>()
+            .map_err(|_| anyhow!("Invalid POSITION_SIZE format"))?;
+
+        if position_size <= 0.0 {
+            return Err(anyhow!("POSITION_SIZE must be greater than 0"));
+        }
+
+        Ok(Self {
+            binance_client: Client::builder()
+                .timeout(Duration::from_secs(config.request_timeout_secs))
+                .build()?,
+            telegram_bot: bot,
+            user_id,
+            symbol,
+            position_size,
+            config: config.clone(),
+            rate_limiter: RateLimiter::new(config.rate_limit_secs),
+            positions: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        })
+    }
+
+    // ============ BINANCE API METHODS ============
+
+    async fn get_klines(&self, symbol: &str) -> Result<Vec<BinanceKline>> {
+        let url = format!(
+            "https://api.binance.com/api/v3/klines?symbol={}&interval=1h&limit={}",
+            urlencoding::encode(symbol),
+            self.config.kline_limit
+        );
+
+        let response = self
+            .binance_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| {
+                error!("Failed to fetch klines: {}", e);
+                anyhow!("Failed to fetch market data: {}", e)
+            })?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Binance API error: {}",
+                response.status()
+            ));
+        }
+
+        let data: Vec<Vec<serde_json::Value>> = response
+            .json()
+            .await
+            .map_err(|e| {
+                error!("Failed to parse klines response: {}", e);
+                anyhow!("Failed to parse market data")
+            })?;
+
+        let klines: Vec<BinanceKline> = data
+            .iter()
+            .filter_map(|k| {
+                if k.len() < 5 {
+                    warn!("Invalid kline data: insufficient fields");
+                    return None;
+                }
+
+                let parse_value = |v: &serde_json::Value| -> Option<f64> {
+                    v.as_str().and_then(|s| s.parse().ok())
+                };
+
+                Some(BinanceKline {
+                    open: parse_value(&k[1])?,
+                    high: parse_value(&k[2])?,
+                    low: parse_value(&k[3])?,
+                    close: parse_value(&k[4])?,
+                    volume: parse_value(&k[7])?,
+                })
+            })
+            .collect();
+
+        if klines.is_empty() {
+            return Err(anyhow!("No valid kline data received"));
+        }
+
+        Ok(klines)
+    }
+
+    async fn get_balance(&self, _asset: &str) -> Result<f64> {
+        // In a real bot, you'd use authenticated Binance API
+        // For demo, returning a simulated balance
+        info!("Fetching balance (simulated)");
+        Ok(1000.0) // Simulated USDT balance
+    }
+
+    // ============ STRATEGY METHODS ============
+
+    fn calculate_rsi(close_prices: &[f64], period: usize) -> Result<Vec<f64>> {
+        if close_prices.len() < period + 1 {
+            return Err(anyhow!(
+                "Not enough data points for RSI calculation. Need {}, got {}",
+                period + 1,
+                close_prices.len()
+            ));
+        }
+
+        let mut rsi_values = Vec::with_capacity(close_prices.len() - period);
+        let mut gains = Vec::new();
+        let mut losses = Vec::new();
+
+        // Calculate price changes
+        for i in 1..close_prices.len() {
+            let change = close_prices[i] - close_prices[i - 1];
+            if change > 0.0 {
+                gains.push(change);
+                losses.push(0.0);
+            } else {
+                gains.push(0.0);
+                losses.push(-change);
+            }
+        }
+
+        let mut avg_gain = 0.0;
+        let mut avg_loss = 0.0;
+
+        // Initial average for first period
+        for i in 0..period {
+            avg_gain += gains[i];
+            avg_loss += losses[i];
+        }
+        avg_gain /= period as f64;
+        avg_loss /= period as f64;
+
+        // Calculate RSI values starting from period
+        for i in period..gains.len() {
+            avg_gain = (avg_gain * (period - 1) as f64 + gains[i]) / period as f64;
+            avg_loss = (avg_loss * (period - 1) as f64 + losses[i]) / period as f64;
+
+            let rsi = if avg_loss == 0.0 {
+                if avg_gain == 0.0 {
+                    50.0
+                } else {
+                    100.0
+                }
+            } else {
+                let rs = avg_gain / avg_loss;
+                100.0 - (100.0 / (1.0 + rs))
+            };
+
+            rsi_values.push(rsi);
+        }
+
+        Ok(rsi_values)
+    }
+
+    async fn analyze_strategy(&self) -> Result<TradingSignal> {
+        // Get market data
+        let klines = self.get_klines(&self.symbol).await?;
+        let close_prices: Vec<f64> = klines.iter().map(|k| k.close).collect();
+
+        // Calculate RSI
+        let rsi_values = Self::calculate_rsi(&close_prices, self.config.rsi_period)?;
+        let current_rsi = rsi_values.last().copied().ok_or_else(|| anyhow!("No RSI values calculated"))?;
+        let current_price = close_prices.last().copied().ok_or_else(|| anyhow!("No price data"))?;
+
+        let action = if current_rsi < self.config.rsi_oversold {
+            Action::Buy
+        } else if current_rsi > self.config.rsi_overbought {
+            Action::Sell
+        } else {
+            Action::Hold
+        };
+
+        info!(
+            "Market Analysis - Symbol: {}, Price: ${:.2}, RSI: {:.2}, Action: {:?}",
+            self.symbol, current_price, current_rsi, action
+        );
+
+        Ok(TradingSignal {
+            symbol: self.symbol.clone(),
+            action,
+            price: current_price,
+            rsi: current_rsi,
+            timestamp: chrono::Utc::now().timestamp(),
+        })
+    }
+
+    // ============ POSITION MANAGEMENT ============
+
+    async fn add_position(&self, symbol: String, amount: f64, price: f64) -> Result<()> {
+        let mut positions = self.positions.lock().await;
+        positions.push(Position {
+            symbol,
+            amount,
+            entry_price: price,
+            timestamp: chrono::Utc::now().timestamp(),
+        });
+        Ok(())
+    }
+
+    async fn get_positions(&self) -> Result<Vec<Position>> {
+        let positions = self.positions.lock().await;
+        Ok(positions.clone())
+    }
+
+    // ============ HELPER METHODS ============
+
+    fn escape_markdown(text: &str) -> String {
+        text.replace('\\', "\\\\")
+            .replace('_', "\\_")
+            .replace('*', "\\*")
+            .replace('[', "\\[")
+            .replace(']', "\\]")
+            .replace('(', "\\(")
+            .replace(')', "\\)")
+            .replace('~', "\\~")
+            .replace('`', "\\`")
+            .replace('\\', "\\\\")
+            .replace('!', "\\!")
+            .replace('.', "\\.")
+            .replace('>', "\\>")
+            .replace('#', "\\#")
+            .replace('+', "\\+")
+            .replace('-', "\\-")
+            .replace('=', "\\=")
+            .replace('|', "\\|")
+            .replace('{', "\\{")
+            .replace('}', "\\}")
+    }
+
+    // ============ TELEGRAM COMMAND HANDLERS ============
+
+    async fn handle_start(&self, msg: &Message) -> Result<()> {
+        let text = r#"🤖 *Trading Bot Started\!*
+
+Commands:
+/balance \- Check your balance
+/positions \- View open positions
+/analyze \- Get current market analysis
+/buy [amount] \- Buy crypto \(e\.g\., /buy 100\)
+/sell [amount] \- Sell crypto \(e\.g\., /sell 50\)
+/status \- Bot status
+/help \- Show this message"#;
+
+        self.telegram_bot
+            .send_message(msg.chat.id, text)
+            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn handle_balance(&self, msg: &Message) -> Result<()> {
+        let balance = self.get_balance("USDT").await?;
+
+        let text = format!("💰 *Balance*\nUSDT: {:.2}", balance);
+
+        self.telegram_bot
+            .send_message(msg.chat.id, Self::escape_markdown(&text))
+            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn handle_analyze(&self, msg: &Message) -> Result<()> {
+        let signal = self.analyze_strategy().await?;
+        let action_str = match signal.action {
+            Action::Buy => "🟢 BUY",
+            Action::Sell => "🔴 SELL",
+            Action::Hold => "⏸️ HOLD",
+        };
+
+        let text = format!(
+            "📊 *Market Analysis*\n\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}\nSignal: {}",
+            signal.symbol, signal.price, signal.rsi, action_str
+        );
+
+        self.telegram_bot
+            .send_message(msg.chat.id, Self::escape_markdown(&text))
+            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn handle_buy(&self, msg: &Message, amount: f64) -> Result<()> {
+        // Validate amount
+        if amount <= 0.0 || amount.is_nan() || amount.is_infinite() {
+            return Err(anyhow!("Invalid amount: must be positive"));
+        }
+
+        if amount > self.position_size * 10.0 {
+            return Err(anyhow!(
+                "Amount exceeds maximum position size of {}",
+                self.position_size * 10.0
+            ));
+        }
+
+        // Get current price for position tracking
+        let signal = self.analyze_strategy().await?;
+        self.add_position(self.symbol.clone(), amount, signal.price).await?;
+
+        info!("BUY order placed - Symbol: {}, Amount: {:.2}, Price: ${:.2}", 
+              self.symbol, amount, signal.price);
+
+        let text = format!(
+            "✅ *Buy Order*\nAmount: {:.2} USDT\nSymbol: {}\nPrice: ${:.2}",
+            amount, self.symbol, signal.price
+        );
+
+        self.telegram_bot
+            .send_message(msg.chat.id, Self::escape_markdown(&text))
+            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn handle_sell(&self, msg: &Message, amount: f64) -> Result<()> {
+        // Validate amount
+        if amount <= 0.0 || amount.is_nan() || amount.is_infinite() {
+            return Err(anyhow!("Invalid amount: must be positive"));
+        }
+
+        let signal = self.analyze_strategy().await?;
+
+        info!("SELL order placed - Symbol: {}, Amount: {:.2}, Price: ${:.2}", 
+              self.symbol, amount, signal.price);
+
+        let text = format!(
+            "✅ *Sell Order*\nAmount: {:.2} USDT\nSymbol: {}\nPrice: ${:.2}",
+            amount, self.symbol, signal.price
+        );
+
+        self.telegram_bot
+            .send_message(msg.chat.id, Self::escape_markdown(&text))
+            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn handle_status(&self, msg: &Message) -> Result<()> {
+        let text = format!(
+            r#"🤖 *Bot Status*
+✅ Running
+📊 Symbol: {}
+📈 Strategy: RSI \({}\)
+⏱️ Uptime: Online"#,
+            self.symbol, self.config.rsi_period
+        );
+
+        self.telegram_bot
+            .send_message(msg.chat.id, Self::escape_markdown(&text))
+            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn handle_positions(&self, msg: &Message) -> Result<()> {
+        let positions = self.get_positions().await?;
+
+        let text = if positions.is_empty() {
+            "📊 *Positions*\nNo open positions".to_string()
+        } else {
+            let mut response = "📊 *Positions*\n\n".to_string();
+            for pos in positions {
+                response.push_str(&format!(
+                    "Symbol: {}\nAmount: {:.2}\nEntry Price: ${:.2}\n\n",
+                    pos.symbol, pos.amount, pos.entry_price
+                ));
+            }
+            response
+        };
+
+        self.telegram_bot
+            .send_message(msg.chat.id, Self::escape_markdown(&text))
+            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn handle_help(&self, msg: &Message) -> Result<()> {
+        self.handle_start(msg).await
+    }
+
+    // ============ MAIN COMMAND HANDLER ============
+
+    async fn handle_message(&self, msg: &Message, cmd: Command) -> Result<()> {
+        // Security: Only allow authorized user
+        if msg.from().map(|u| u.id.0) != Some(self.user_id) {
+            warn!("Unauthorized access attempt from user: {:?}", msg.from().map(|u| u.id.0));
+            self.telegram_bot
+                .send_message(msg.chat.id, "⛔ Unauthorized access")
+                .await?;
+            return Ok(());
+        }
+
+        // Rate limiting
+        if let Err(e) = self.rate_limiter.check(self.user_id).await {
+            self.telegram_bot
+                .send_message(msg.chat.id, format!("⏱️ {}", e))
+                .await?;
+            return Ok(());
+        }
+
+        match cmd {
+            Command::Start => self.handle_start(msg).await?,
+            Command::Balance => self.handle_balance(msg).await?,
+            Command::Analyze => self.handle_analyze(msg).await?,
+            Command::Buy { amount } => self.handle_buy(msg, amount).await?,
+            Command::Sell { amount } => self.handle_sell(msg, amount).await?,
+            Command::Status => self.handle_status(msg).await?,
+            Command::Positions => self.handle_positions(msg).await?,
+            Command::Help => self.handle_help(msg).await?,
+        };
+
+        Ok(())
+    }
+}
+
+// ============ MAIN ============
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    dotenv().ok();
+
+    // Initialize tracing
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::INFO)
+        .with_target(false)
+        .with_thread_ids(true)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("Failed to set tracing subscriber");
+
+    info!("🤖 Starting Trading Bot...");
+
+    let telegram_bot = Bot::new(
+        std::env::var("TELEGRAM_BOT_TOKEN")
+            .expect("TELEGRAM_BOT_TOKEN env var not set"),
+    );
+
+    // Create shared bot instance
+    let trading_bot = Arc::new(TradingBot::new(telegram_bot.clone()).await?);
+
+    info!(
+        "🤖 Bot is running! Symbol: {}, User ID: {}",
+        trading_bot.symbol, trading_bot.user_id
+    );
+
+    // Command handler with shared bot instance
+    let handler = {
+        let bot = Arc::clone(&trading_bot);
+        move |_: Bot, msg: Message, cmd: Command| {
+            let bot = Arc::clone(&bot);
+            async move {
+                if let Err(e) = bot.handle_message(&msg, cmd).await {
+                    error!("Error handling message: {}", e);
+                    let _ = bot
+                        .telegram_bot
+                        .send_message(
+                            msg.chat.id,
+                            format!("❌ Error: {}", e),
+                        )
+                        .await;
+                }
+                Ok(())
+            }
+        }
+    };
+
+    Command::repl(trading_bot.telegram_bot.clone(), handler).await;
+
+    Ok(())
+}
+
+// ============ AUTO TRADING LOOP (Optional) ============
+
+#[allow(dead_code)]
+async fn auto_trading_loop(bot: Arc<TradingBot>, chat_id: ChatId) -> Result<()> {
+    loop {
+        match bot.analyze_strategy().await {
+            Ok(signal) => {
+                match signal.action {
+                    Action::Buy => {
+                        info!(
+                            "🔵 BUY signal detected - Symbol: {}, Price: ${:.2}, RSI: {:.2}",
+                            signal.symbol, signal.price, signal.rsi
+                        );
+
+                        let text = format!(
+                            "🚀 *AUTO BUY*\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}",
+                            signal.symbol, signal.price, signal.rsi
+                        );
+
+                        if let Err(e) = bot
+                            .telegram_bot
+                            .send_message(chat_id, TradingBot::escape_markdown(&text))
+                            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                            .await
+                        {
+                            error!("Failed to send buy signal: {}", e);
+                        }
+
+                        // Execute buy logic here
+                        if let Err(e) = bot.add_position(signal.symbol, bot.position_size, signal.price).await {
+                            error!("Failed to add position: {}", e);
+                        }
+                    }
+                    Action::Sell => {
+                        info!(
+                            "🔴 SELL signal detected - Symbol: {}, Price: ${:.2}, RSI: {:.2}",
+                            signal.symbol, signal.price, signal.rsi
+                        );
+
+                        let text = format!(
+                            "📉 *AUTO SELL*\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}",
+                            signal.symbol, signal.price, signal.rsi
+                        );
+
+                        let _ = bot
+                            .telegram_bot
+                            .send_message(chat_id, TradingBot::escape_markdown(&text))
+                            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                            .await;
+                    }
+                    Action::Hold => {
+                        info!(
+                            "⏸️ HOLD - RSI: {:.2} is within range",
+                            signal.rsi
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to analyze strategy: {}", e);
+            }
+        }
+
+        // Wait for next check (configurable, default 1 hour)
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    }
+}
