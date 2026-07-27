@@ -9,6 +9,8 @@ use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 use tracing::{error, info, warn};
 
+use crate::binance_client::RealBinanceClient;
+
 // ============ CONFIGURATION ============
 
 #[derive(Debug, Clone)]
@@ -142,6 +144,7 @@ impl RateLimiter {
 
 struct TradingBot {
     binance_client: Client,
+    real_binance: RealBinanceClient,
     telegram_bot: Bot,
     user_id: u64,
     symbol: String,
@@ -168,11 +171,15 @@ impl TradingBot {
         if position_size <= 0.0 {
             return Err(anyhow!("POSITION_SIZE must be greater than 0"));
         }
+        
+        // Create real Binance client
+        let real_binance = RealBinanceClient::new()?;
 
         Ok(Self {
             binance_client: Client::builder()
                 .timeout(Duration::from_secs(config.request_timeout_secs))
                 .build()?,
+            real_binance,
             telegram_bot: bot,
             user_id,
             symbol,
@@ -246,11 +253,10 @@ impl TradingBot {
         Ok(klines)
     }
 
-    async fn get_balance(&self, _asset: &str) -> Result<f64> {
-        // In a real bot, you'd use authenticated Binance API
-        // For demo, returning a simulated balance
-        info!("Fetching balance (simulated)");
-        Ok(1000.0) // Simulated USDT balance
+    async fn get_balance_real(&self, asset: &str) -> Result<f64> {
+        let balance = self.real_binance.get_balance(asset).await?;
+        info!("Real balance - {}: {:.2}", asset, balance);
+        Ok(balance)
     }
 
     // ============ STRATEGY METHODS ============
@@ -411,9 +417,19 @@ Commands:
     }
 
     async fn handle_balance(&self, msg: &Message) -> Result<()> {
-        let balance = self.get_balance("USDT").await?;
+        let usdt = self.real_binance.get_usdt_balance().await?;
+        let btc = self.real_binance.get_btc_balance().await?;
+        
+        let text = format!(
+            r#"💰 *Real Account Balance*
 
-        let text = format!("💰 *Balance*\nUSDT: {:.2}", balance);
+USDT: {:.2}
+BTC: {:.8}
+Total USDT Value: ~${:.2}"#,
+            usdt,
+            btc,
+            usdt + (btc * self.get_current_btc_price().await?)
+        );
 
         self.telegram_bot
             .send_message(msg.chat.id, Self::escape_markdown(&text))
@@ -449,24 +465,42 @@ Commands:
         if amount <= 0.0 || amount.is_nan() || amount.is_infinite() {
             return Err(anyhow!("Invalid amount: must be positive"));
         }
-
-        if amount > self.position_size * 10.0 {
+        
+        // Get current BTC price
+        let signal = self.analyze_strategy().await?;
+        let btc_amount = amount / signal.price;
+        
+        // Check if you have enough USDT
+        let usdt_balance = self.real_binance.get_usdt_balance().await?;
+        
+        if amount > usdt_balance {
             return Err(anyhow!(
-                "Amount exceeds maximum position size of {}",
-                self.position_size * 10.0
+                "Insufficient USDT balance. You have {:.2}, trying to spend {:.2}",
+                usdt_balance, amount
             ));
         }
-
-        // Get current price for position tracking
-        let signal = self.analyze_strategy().await?;
-        self.add_position(self.symbol.clone(), amount, signal.price).await?;
-
-        info!("BUY order placed - Symbol: {}, Amount: {:.2}, Price: ${:.2}", 
-              self.symbol, amount, signal.price);
-
+        
+        // Place REAL order!
+        let order_id = self.real_binance.place_market_buy(&self.symbol, btc_amount).await?;
+        
+        // Add to positions
+        self.add_position(self.symbol.clone(), btc_amount, signal.price).await?;
+        
+        info!("✅ REAL BUY executed! Order ID: {}", order_id);
+        
         let text = format!(
-            "✅ *Buy Order*\nAmount: {:.2} USDT\nSymbol: {}\nPrice: ${:.2}",
-            amount, self.symbol, signal.price
+            r#"✅ *Real Buy Order Filled!*
+Symbol: {}
+Amount: {:.8} BTC
+Spent: {:.2} USDT
+Price: ${:.2}
+Order ID: {}
+⚠️ This is a REAL trade on the exchange!"#
+            self.symbol,
+            btc_amount,
+            amount,
+            signal.price,
+            order_id
         );
 
         self.telegram_bot
