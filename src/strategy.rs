@@ -319,7 +319,7 @@ impl StrategyAnalyzer {
                 (StrategySignal::Sell, sell_score / 7.0)
             }
         } else {
-            (StrategySignal::Hold, 0.0)
+            (StrategySignal::Hold, 0.0_f64)
         };
 
         // ============ RISK MANAGEMENT ============
