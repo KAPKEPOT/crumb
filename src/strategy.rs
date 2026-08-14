@@ -379,7 +379,7 @@ impl StrategyAnalyzer {
             current_price,
             stop_loss,
             take_profit,
-        })
+        ))
     }
 
     /// Calculate Average True Range (ATR) for volatility
