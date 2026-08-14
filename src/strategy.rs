@@ -36,16 +36,6 @@ pub enum StrategySignal {
     Hold,
 }
 
-#[derive(Debug, Clone)]
-pub struct EnhancedTradingSignal {
-    pub signal: StrategySignal,
-    pub confidence: f64,  // 0.0 to 1.0
-    pub indicators: TechnicalIndicators,
-    pub entry_price: f64,
-    pub stop_loss: f64,
-    pub take_profit: f64,
-}
-
 // TECHNICAL INDICATORS
 pub struct StrategyAnalyzer;
 

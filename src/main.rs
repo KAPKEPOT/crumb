@@ -76,9 +76,12 @@ enum Action {
 #[derive(Debug, Clone)]
 struct TradingSignal {
     symbol: String,
-    action: Action,
-    price: f64,
-    rsi: f64,
+    signal: strategy::StrategySignal,
+    entry_price: f64,
+    indicators: strategy::TechnicalIndicators,
+    confidence: f64,
+    stop_loss: f64,
+    take_profit: f64,
     timestamp: i64,
 }
 
@@ -263,7 +266,7 @@ impl TradingBot {
         }
     }
     
-    async fn analyze_strategy(&self) -> Result<strategy::EnhancedTradingSignal> {
+    async fn analyze_strategy(&self) -> Result<TradingSignal> {
         let klines = self.get_klines(&self.symbol).await?;
         
         // Convert to strategy module format
@@ -281,11 +284,19 @@ impl TradingBot {
         let config = strategy::StrategyConfig::default();
         let enhanced_signal = strategy::StrategyAnalyzer::analyze(&kline_data, &config)?;
         
-        Ok(enhanced_signal)
+        Ok(TradingSignal {
+            symbol: self.symbol.clone(),
+            signal: enhanced_signal.signal,
+            entry_price: enhanced_signal.entry_price,
+            indicators: enhanced_signal.indicators,
+            confidence: enhanced_signal.confidence,
+            stop_loss: enhanced_signal.stop_loss,
+            take_profit: enhanced_signal.take_profit,
+            timestamp: chrono::Utc::now().timestamp(),
+        })
     }
 
-    // ============ POSITION MANAGEMENT ============
-
+    // POSITION MANAGEMENT
     async fn add_position(&self, symbol: String, amount: f64, price: f64) -> Result<()> {
         let mut positions = self.positions.lock().await;
         positions.push(Position {
@@ -399,7 +410,7 @@ Total USDT Value: ~${:.2}"#,
         
         // Get current BTC price
         let signal = self.analyze_strategy().await?;
-        let btc_amount = amount / signal.price;
+        let btc_amount = amount / signal.entry_price;
         
         // Check if you have enough USDT
         let usdt_balance = self.real_binance.get_usdt_balance().await?;
@@ -415,9 +426,9 @@ Total USDT Value: ~${:.2}"#,
         let order_id = self.real_binance.place_market_buy(&self.symbol, btc_amount).await?;
         
         // Add to positions
-        self.add_position(self.symbol.clone(), btc_amount, signal.price).await?;
+        self.add_position(self.symbol.clone(), btc_amount, signal.entry_price).await?;
         
-        info!("✅ REAL BUY executed! Order ID: {}", order_id);
+        info!(" REAL BUY executed! Order ID: {}", order_id);
         
         let text = format!(
             r#"✅ *Real Buy Order Filled!*
@@ -430,7 +441,7 @@ Order ID: {}
             self.symbol,
             btc_amount,
             amount,
-            signal.price,
+            signal.entry_price,
             order_id
         );
 
@@ -451,11 +462,10 @@ Order ID: {}
         let signal = self.analyze_strategy().await?;
 
         info!("SELL order placed - Symbol: {}, Amount: {:.2}, Price: ${:.2}", 
-              self.symbol, amount, signal.price);
-
+              self.symbol, amount, signal.entry_price);
         let text = format!(
             "✅ *Sell Order*\nAmount: {:.2} USDT\nSymbol: {}\nPrice: ${:.2}",
-            amount, self.symbol, signal.price
+            amount, self.symbol, signal.entry_price
         );
 
         self.telegram_bot
