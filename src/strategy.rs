@@ -263,8 +263,8 @@ impl StrategyAnalyzer {
         };
 
         // Scoring system (0-5 for each condition)
-        let mut buy_score = 0.0;
-        let mut sell_score = 0.0;
+        let mut buy_score: f64 = 0.0;
+        let mut sell_score: f64 = 0.0;
 
         // ============ BUY SIGNALS ============
 
