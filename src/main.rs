@@ -57,11 +57,6 @@ impl Config {
     }
 }
 
-// ============ DATA STRUCTURES ============
-
-// #[derive(Debug, Deserialize)]
-// struct BinanceKlineResponse(Vec<Vec<serde_json::Value>>);
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BinanceKline {
     open: f64,
@@ -84,7 +79,7 @@ struct TradingSignal {
     action: Action,
     price: f64,
     rsi: f64,
-    // timestamp: i64,
+    timestamp: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,24 +374,33 @@ Total USDT Value: ~${:.2}"#,
         Ok(())
     }
 
-    async fn  handle_analyze(&self, msg: &Message) -> Result<()> {
+    async fn handle_analyze(&self, msg: &Message) -> Result<()> {
         let signal = self.analyze_strategy().await?;
-        let action_str = match signal.action {
-            Action::Buy => "🟢 BUY",
-            Action::Sell => "🔴 SELL",
-            Action::Hold => "⏸️ HOLD",
+        let action_str = match signal.signal {
+            strategy::StrategySignal::StrongBuy => "🟢 STRONG BUY",
+            strategy::StrategySignal::Buy => "🟢 BUY",
+            strategy::StrategySignal::Sell => "🔴 SELL",
+            strategy::StrategySignal::StrongSell => "🔴 STRONG SELL",
+            strategy::StrategySignal::Hold => "⏸️ HOLD",
         };
-
+        
         let text = format!(
-            "📊 *Market Analysis*\n\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}\nSignal: {}\nConfidence: {:.0}%\nStop Loss: ${:.2}\nTake Profit: ${:.2}",
-            signal.symbol, signal.price, signal.rsi, action_str, signal.confidence * 100.0, signal.stop_loss, signal.take_profit
+            "📊 *Market Analysis*\n\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}\nMACD: {:.2}\nSignal: {}\nConfidence: {:.0}%\nStop Loss: ${:.2}\nTake Profit: ${:.2}",
+            self.symbol,
+            signal.entry_price,
+            signal.indicators.rsi,
+            signal.indicators.macd,
+            action_str,
+            signal.confidence * 100.0,
+            signal.stop_loss,
+            signal.take_profit
         );
-
+        
         self.telegram_bot
             .send_message(msg.chat.id, Self::escape_markdown(&text))
             .parse_mode(teloxide::types::ParseMode::MarkdownV2)
             .await?;
-
+        
         Ok(())
     }
 
