@@ -1,6 +1,3 @@
-mod binance_client;
-mod strategy;
-
 use anyhow::{anyhow, Result};
 use dotenvy::dotenv;
 use reqwest::Client;
@@ -12,6 +9,9 @@ use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 use tracing::{error, info, warn};
 
+mod binance_client;
+mod strategy;
+mod types;
 use crate::binance_client::RealBinanceClient;
 
 // ============ CONFIGURATION ============
@@ -64,25 +64,6 @@ struct BinanceKline {
     low: f64,
     close: f64,
     volume: f64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Action {
-    Buy,
-    Sell,
-    Hold,
-}
-
-#[derive(Debug, Clone)]
-struct TradingSignal {
-    symbol: String,
-    signal: strategy::StrategySignal,
-    entry_price: f64,
-    indicators: strategy::TechnicalIndicators,
-    confidence: f64,
-    stop_loss: f64,
-    take_profit: f64,
-    timestamp: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,7 +247,7 @@ impl TradingBot {
         }
     }
     
-    async fn analyze_strategy(&self) -> Result<TradingSignal> {
+    async fn analyze_strategy(&self) -> Result<types::TradingSignal> {
         let klines = self.get_klines(&self.symbol).await?;
         
         // Convert to strategy module format
@@ -282,7 +263,7 @@ impl TradingBot {
             .collect();
             
         let config = strategy::StrategyConfig::default();
-        let enhanced_signal = strategy::StrategyAnalyzer::analyze(&kline_data, &config)?;
+        let trading_signal = strategy::StrategyAnalyzer::analyze(&self.symbol, &kline_data, &config)?;
         
         Ok(TradingSignal {
             symbol: self.symbol.clone(),
@@ -617,18 +598,18 @@ async fn auto_trading_loop(bot: Arc<TradingBot>, chat_id: ChatId) -> Result<()> 
     loop {
         match bot.analyze_strategy().await {
             Ok(signal) => {
-                match signal.action {
-                    Action::Buy => {
+                match signal.signal {
+                    strategy::StrategySignal::StrongBuy | strategy::StrategySignal::Buy => {
                         info!(
                             "🔵 BUY signal detected - Symbol: {}, Price: ${:.2}, RSI: {:.2}",
-                            signal.symbol, signal.price, signal.rsi
+                            signal.symbol, signal.entry_price, signal.indicators.rsi
                         );
-
+                        
                         let text = format!(
                             "🚀 *AUTO BUY*\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}",
-                            signal.symbol, signal.price, signal.rsi
+                            signal.symbol, signal.entry_price, signal.indicators.rsi
                         );
-
+                        
                         if let Err(e) = bot
                             .telegram_bot
                             .send_message(chat_id, TradingBot::escape_markdown(&text))
@@ -637,33 +618,34 @@ async fn auto_trading_loop(bot: Arc<TradingBot>, chat_id: ChatId) -> Result<()> 
                         {
                             error!("Failed to send buy signal: {}", e);
                         }
-
-                        // Execute buy logic here
-                        if let Err(e) = bot.add_position(signal.symbol, bot.position_size, signal.price).await {
+                        
+                        if let Err(e) = bot.add_position(signal.symbol.clone(), bot.position_size, signal.entry_price).await {
                             error!("Failed to add position: {}", e);
                         }
                     }
-                    Action::Sell => {
+                    
+                    strategy::StrategySignal::Sell | strategy::StrategySignal::StrongSell => {
                         info!(
                             "🔴 SELL signal detected - Symbol: {}, Price: ${:.2}, RSI: {:.2}",
-                            signal.symbol, signal.price, signal.rsi
+                            signal.symbol, signal.entry_price, signal.indicators.rsi
                         );
-
+                        
                         let text = format!(
                             "📉 *AUTO SELL*\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}",
-                            signal.symbol, signal.price, signal.rsi
+                            signal.symbol, signal.entry_price, signal.indicators.rsi
                         );
-
+                        
                         let _ = bot
                             .telegram_bot
                             .send_message(chat_id, TradingBot::escape_markdown(&text))
                             .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                             .await;
                     }
-                    Action::Hold => {
+                    
+                    strategy::StrategySignal::Hold => {
                         info!(
                             "⏸️ HOLD - RSI: {:.2} is within range",
-                            signal.rsi
+                            signal.indicators.rsi
                         );
                     }
                 }

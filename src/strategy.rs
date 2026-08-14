@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-// ============ ENHANCED DATA STRUCTURES ============
+use crate::types::TradingSignal;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KlineData {
@@ -201,7 +201,7 @@ impl StrategyAnalyzer {
     }
 
     /// Comprehensive strategy analysis with multi-indicator confirmation
-    pub fn analyze(klines: &[KlineData], config: &StrategyConfig) -> Result<EnhancedTradingSignal> {
+    pub fn analyze(symbol: &str, klines: &[KlineData], config: &StrategyConfig) -> Result<TradingSignal> {
         if klines.len() < 30 {
             return Err(anyhow!("Minimum 30 klines required for full analysis"));
         }
@@ -371,11 +371,12 @@ impl StrategyAnalyzer {
             current_ema_long
         );
 
-        Ok(EnhancedTradingSignal {
+        Ok(TradingSignal::new(
+            symbol.to_string(),
             signal,
-            confidence: confidence.min(1.0),
+            confidence.min(1.0),
             indicators,
-            entry_price: current_price,
+            current_price,
             stop_loss,
             take_profit,
         })
