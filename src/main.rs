@@ -263,7 +263,7 @@ impl TradingBot {
         }
     }
     
-    async fn analyze_strategy(&self) -> Result<TradingSignal> {
+    async fn analyze_strategy(&self) -> Result<strategy::EnhancedTradingSignal> {
         let klines = self.get_klines(&self.symbol).await?;
         
         // Convert to strategy module format
@@ -281,20 +281,7 @@ impl TradingBot {
         let config = strategy::StrategyConfig::default();
         let enhanced_signal = strategy::StrategyAnalyzer::analyze(&kline_data, &config)?;
         
-        let action = match enhanced_signal.signal {
-            strategy::StrategySignal::StrongBuy => Action::Buy,
-            strategy::StrategySignal::Buy => Action::Buy,
-            strategy::StrategySignal::Sell => Action::Sell,
-            strategy::StrategySignal::StrongSell => Action::Sell,
-            strategy::StrategySignal::Hold => Action::Hold,
-        };
-        Ok(TradingSignal {
-            symbol: self.symbol.clone(),
-            action,
-            price: enhanced_signal.entry_price,
-            rsi: enhanced_signal.indicators.rsi,
-            timestamp: chrono::Utc::now().timestamp(),
-        })
+        Ok(enhanced_signal)
     }
 
     // ============ POSITION MANAGEMENT ============

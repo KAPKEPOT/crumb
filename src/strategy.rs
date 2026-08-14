@@ -46,8 +46,7 @@ pub struct EnhancedTradingSignal {
     pub take_profit: f64,
 }
 
-// ============ TECHNICAL INDICATORS ============
-
+// TECHNICAL INDICATORS
 pub struct StrategyAnalyzer;
 
 impl StrategyAnalyzer {
