@@ -63,7 +63,8 @@ impl RealBinanceClient {
             base_url: "https://api.binance.com".to_string(),
         })
     }
-        /// Generate HMAC-SHA256 signature for authenticated requests
+    
+    /// Generate HMAC-SHA256 signature for authenticated requests
     fn generate_signature(&self, params: &[(&str, String)]) -> Result<String> {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;

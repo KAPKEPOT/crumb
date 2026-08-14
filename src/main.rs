@@ -395,7 +395,6 @@ impl TradingBot {
             .replace(')', "\\)")
             .replace('~', "\\~")
             .replace('`', "\\`")
-            .replace('\\', "\\\\")
             .replace('!', "\\!")
             .replace('.', "\\.")
             .replace('>', "\\>")
@@ -408,22 +407,12 @@ impl TradingBot {
             .replace('}', "\\}")
     }
 
-    // ============ TELEGRAM COMMAND HANDLERS ============
-
+    // TELEGRAM COMMAND HANDLERS
     async fn handle_start(&self, msg: &Message) -> Result<()> {
-        let text = r#"🤖 *Trading Bot Started\!*
-
-Commands:
-/balance \- Check your balance
-/positions \- View open positions
-/analyze \- Get current market analysis
-/buy [amount] \- Buy crypto \(e\.g\., /buy 100\)
-/sell [amount] \- Sell crypto \(e\.g\., /sell 50\)
-/status \- Bot status
-/help \- Show this message"#;
+        let text = "🤖 *Trading Bot Started\\!*\n\nCommands:\n/balance \\- Check your balance\n/positions \\- View open positions\n/analyze \\- Get current market analysis\n/buy [amount] \\- Buy crypto (e.g., /buy 100)\n/sell [amount] \\- Sell crypto (e.g., /sell 50)\n/status \\- Bot status\n/help \\- Show this message";
 
         self.telegram_bot
-            .send_message(msg.chat.id, text)
+            .send_message(msg.chat.id, Self::escape_markdown(text))
             .parse_mode(teloxide::types::ParseMode::MarkdownV2)
             .await?;
 
@@ -551,11 +540,7 @@ Order ID: {}
 
     async fn handle_status(&self, msg: &Message) -> Result<()> {
         let text = format!(
-            r#"🤖 *Bot Status*
-✅ Running
-📊 Symbol: {}
-📈 Strategy: RSI \({}\)
-⏱️ Uptime: Online"#,
+            "🤖 *Bot Status*\n✅ Running\n📊 Symbol: {}\n📈 Strategy: RSI ({})\n⏱️ Uptime: Online",
             self.symbol, self.config.rsi_period
         );
 
