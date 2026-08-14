@@ -118,32 +118,52 @@ impl StrategyAnalyzer {
     pub fn calculate_macd(prices: &[f64]) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
         let ema_12 = Self::calculate_ema(prices, 12)?;
         let ema_26 = Self::calculate_ema(prices, 26)?;
-
-        if ema_12.len() != ema_26.len() {
-            return Err(anyhow!("EMA length mismatch"));
-        }
-
-        // MACD line = EMA12 - EMA26
+        
+        let padding_needed = ema_12.len() - ema_26.len();
+        let mut aligned_ema_26 = vec![f64::NAN; padding_needed];
+        aligned_ema_26.extend(ema_26);
+        
+        // MACD line = EMA12 - EMA26 (only valid where both are defined)
         let macd_line: Vec<f64> = ema_12
             .iter()
-            .zip(ema_26.iter())
-            .map(|(e12, e26)| e12 - e26)
+            .zip(aligned_ema_26.iter())
+            .map(|(e12, e26)| {
+                if e26.is_nan() {
+                    f64::NAN  // Invalid MACD before EMA26 stabilizes
+                } else {
+                    e12 - e26
+                }
+            })
             .collect();
-
-        // Signal line = EMA9 of MACD
-        let signal_line = Self::calculate_ema(&macd_line, 9)?;
-
-        // Pad signal line with zeros to match MACD length
-        let mut padded_signal = vec![0.0; macd_line.len() - signal_line.len()];
+        
+        // Signal line = EMA9 of MACD (only calculate from valid MACD values)
+        // Find first valid (non-NaN) MACD value
+        let first_valid_idx = macd_line.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+        let valid_macd = &macd_line[first_valid_idx..];
+        let signal_line = if valid_macd.len() >= 9 {
+            Self::calculate_ema(valid_macd, 9)?
+        } else {
+            return Err(anyhow!("Not enough valid MACD data to calculate signal line"));
+        };
+        
+        // Pad signal line to match full MACD length
+        let signal_padding = first_valid_idx + (valid_macd.len() - signal_line.len());
+        let mut padded_signal = vec![f64::NAN; signal_padding];
         padded_signal.extend(signal_line);
-
+        
         // Histogram = MACD - Signal
         let histogram: Vec<f64> = macd_line
             .iter()
             .zip(padded_signal.iter())
-            .map(|(m, s)| m - s)
+            .map(|(m, s)| {
+                if m.is_nan() || s.is_nan() {
+                    f64::NAN
+                } else {
+                    m - s
+                }
+            });
             .collect();
-
+            
         Ok((macd_line, padded_signal, histogram))
     }
 
