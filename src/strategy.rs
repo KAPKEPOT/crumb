@@ -231,9 +231,17 @@ impl StrategyAnalyzer {
         let current_volume_sma = *volume_sma.last().ok_or_else(|| anyhow!("No Volume SMA"))?;
         let current_price = *closes.last().ok_or_else(|| anyhow!("No price data"))?;
 
-        // Get previous values for trend analysis
+        // Get previous values for trend analysis (skip NaN values)
         let prev_histogram = if histogram.len() > 1 {
-            histogram[histogram.len() - 2]
+            // Find last non-NaN histogram value for proper trend comparison
+            let mut prev = 0.0;
+            for i in (0..histogram.len() - 1).rev() {
+                if !histogram[i].is_nan() {
+                    prev = histogram[i];
+                    break;
+                }
+            }
+            prev
         } else {
             0.0
         };
