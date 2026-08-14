@@ -13,14 +13,11 @@ mod binance_client;
 mod strategy;
 mod types;
 use crate::binance_client::RealBinanceClient;
-use crate::types::TradingSignal;
 
 // CONFIGURATION 
 #[derive(Debug, Clone)]
 struct Config {
     rsi_period: usize,
-    rsi_oversold: f64,
-    rsi_overbought: f64,
     kline_limit: usize,
     request_timeout_secs: u64,
     rate_limit_secs: u64,
@@ -33,14 +30,6 @@ impl Config {
                 .unwrap_or_else(|_| "14".to_string())
                 .parse()
                 .unwrap_or(14),
-            rsi_oversold: std::env::var("RSI_OVERSOLD")
-                .unwrap_or_else(|_| "30".to_string())
-                .parse()
-                .unwrap_or(30.0),
-            rsi_overbought: std::env::var("RSI_OVERBOUGHT")
-                .unwrap_or_else(|_| "70".to_string())
-                .parse()
-                .unwrap_or(70.0),
             kline_limit: std::env::var("KLINE_LIMIT")
                 .unwrap_or_else(|_| "50".to_string())
                 .parse()
@@ -230,12 +219,6 @@ impl TradingBot {
         }
 
         Ok(klines)
-    }
-
-    async fn get_balance_real(&self, asset: &str) -> Result<f64> {
-        let balance = self.real_binance.get_balance(asset).await?;
-        info!("Real balance - {}: {:.2}", asset, balance);
-        Ok(balance)
     }
     
     async fn get_current_btc_price(&self) -> Result<f64> {
