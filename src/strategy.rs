@@ -161,7 +161,7 @@ impl StrategyAnalyzer {
                 } else {
                     m - s
                 }
-            });
+            })
             .collect();
             
         Ok((macd_line, padded_signal, histogram))
