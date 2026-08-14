@@ -10,41 +10,11 @@ use teloxide::utils::command::BotCommands;
 use tracing::{error, info, warn};
 
 mod binance_client;
+mod config;
 mod strategy;
 mod types;
 use crate::binance_client::RealBinanceClient;
-
-// CONFIGURATION 
-#[derive(Debug, Clone)]
-struct Config {
-    rsi_period: usize,
-    kline_limit: usize,
-    request_timeout_secs: u64,
-    rate_limit_secs: u64,
-}
-
-impl Config {
-    fn from_env() -> Result<Self> {
-        Ok(Self {
-            rsi_period: std::env::var("RSI_PERIOD")
-                .unwrap_or_else(|_| "14".to_string())
-                .parse()
-                .unwrap_or(14),
-            kline_limit: std::env::var("KLINE_LIMIT")
-                .unwrap_or_else(|_| "50".to_string())
-                .parse()
-                .unwrap_or(50),
-            request_timeout_secs: std::env::var("REQUEST_TIMEOUT_SECS")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse()
-                .unwrap_or(10),
-            rate_limit_secs: std::env::var("RATE_LIMIT_SECS")
-                .unwrap_or_else(|_| "2".to_string())
-                .parse()
-                .unwrap_or(2),
-        })
-    }
-}
+use crate::config::Config;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BinanceKline {
@@ -109,8 +79,7 @@ impl RateLimiter {
     }
 }
 
-// ============ MAIN BOT STRUCTURE ============
-
+// MAIN BOT STRUCTURE 
 struct TradingBot {
     binance_client: Client,
     real_binance: RealBinanceClient,

@@ -158,6 +158,7 @@ impl RealBinanceClient {
     }
     
     /// Place a market sell order
+    #[allow(dead_code)]
     pub async fn place_market_sell(&self, symbol: &str, quantity: f64) -> Result<String> {
         self.place_market_order(symbol, quantity, "SELL").await
     }
