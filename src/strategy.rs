@@ -326,20 +326,33 @@ impl StrategyAnalyzer {
 
         // ============ DECISION LOGIC ============
 
+        let net_score = (buy_score - sell_score).abs();
+        let dominant_signal = if buy_score > sell_score { "buy" } else { "sell" };
         let (signal, confidence) = if buy_score > sell_score + 1.5 {
+            // Clear BUY signal with strong confidence
             if buy_score >= 4.5 {
-                (StrategySignal::StrongBuy, buy_score / 7.0)
+                (StrategySignal::StrongBuy, (buy_score / 7.0).min(1.0))
             } else {
-                (StrategySignal::Buy, buy_score / 7.0)
+                (StrategySignal::Buy, (buy_score / 7.0).min(1.0))
             }
         } else if sell_score > buy_score + 1.5 {
+            // Clear SELL signal with strong confidence
             if sell_score >= 4.5 {
-                (StrategySignal::StrongSell, sell_score / 7.0)
+                (StrategySignal::StrongSell, (sell_score / 7.0).min(1.0))
             } else {
-                (StrategySignal::Sell, sell_score / 7.0)
+                (StrategySignal::Sell, (sell_score / 7.0).min(1.0))
             }
         } else {
-            (StrategySignal::Hold, 0.0_f64)
+            // Indecisive/conflicting signals - Hold with calculated confidence
+            // Use the higher score to show which direction is slightly favored
+            let hold_confidence = if buy_score > sell_score {
+                (buy_score / 7.0) * 0.5  // 50% of buy confidence
+            } else if sell_score > buy_score {
+                (sell_score / 7.0) * 0.5  // 50% of sell confidence
+            } else {
+                0.25  // Equal scores = very low confidence
+            };
+            (StrategySignal::Hold, hold_confidence.min(1.0))
         };
 
         // ============ RISK MANAGEMENT ============
