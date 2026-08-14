@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-// ============ ENHANCED DATA STRUCTURES ============
+use crate::types::TradingSignal;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KlineData {
@@ -27,7 +27,7 @@ pub struct TechnicalIndicators {
     pub volume_sma: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum StrategySignal {
     StrongBuy,
     Buy,
@@ -36,18 +36,7 @@ pub enum StrategySignal {
     Hold,
 }
 
-#[derive(Debug, Clone)]
-pub struct EnhancedTradingSignal {
-    pub signal: StrategySignal,
-    pub confidence: f64,  // 0.0 to 1.0
-    pub indicators: TechnicalIndicators,
-    pub entry_price: f64,
-    pub stop_loss: f64,
-    pub take_profit: f64,
-}
-
-// ============ TECHNICAL INDICATORS ============
-
+// TECHNICAL INDICATORS
 pub struct StrategyAnalyzer;
 
 impl StrategyAnalyzer {
@@ -212,7 +201,7 @@ impl StrategyAnalyzer {
     }
 
     /// Comprehensive strategy analysis with multi-indicator confirmation
-    pub fn analyze(klines: &[KlineData], config: &StrategyConfig) -> Result<EnhancedTradingSignal> {
+    pub fn analyze(symbol: &str, klines: &[KlineData], config: &StrategyConfig) -> Result<TradingSignal> {
         if klines.len() < 30 {
             return Err(anyhow!("Minimum 30 klines required for full analysis"));
         }
@@ -221,12 +210,12 @@ impl StrategyAnalyzer {
         let volumes: Vec<f64> = klines.iter().map(|k| k.volume).collect();
 
         // Calculate all indicators
-        let rsi_values = Self::calculate_rsi(&closes, 14)?;
+        let rsi_values = Self::calculate_rsi(&closes, config.rsi_period)?;
         let (macd_line, signal_line, histogram) = Self::calculate_macd(&closes)?;
-        let ema_short = Self::calculate_ema(&closes, 9)?;
-        let ema_long = Self::calculate_ema(&closes, 21)?;
-        let (bb_upper, bb_middle, bb_lower) = Self::calculate_bollinger_bands(&closes, 20, 2.0)?;
-        let volume_sma = Self::calculate_volume_sma(&volumes, 20)?;
+        let ema_short = Self::calculate_ema(&closes, config.ema_short)?;
+        let ema_long = Self::calculate_ema(&closes, config.ema_long)?;
+        let (bb_upper, bb_middle, bb_lower) = Self::calculate_bollinger_bands(&closes, config.bb_period, 2.0)?;
+        let volume_sma = Self::calculate_volume_sma(&volumes, config.volume_period)?;
 
         // Get current values
         let current_rsi = *rsi_values.last().ok_or_else(|| anyhow!("No RSI data"))?;
@@ -242,9 +231,17 @@ impl StrategyAnalyzer {
         let current_volume_sma = *volume_sma.last().ok_or_else(|| anyhow!("No Volume SMA"))?;
         let current_price = *closes.last().ok_or_else(|| anyhow!("No price data"))?;
 
-        // Get previous values for trend analysis
+        // Get previous values for trend analysis (skip NaN values)
         let prev_histogram = if histogram.len() > 1 {
-            histogram[histogram.len() - 2]
+            // Find last non-NaN histogram value for proper trend comparison
+            let mut prev = 0.0;
+            for i in (0..histogram.len() - 1).rev() {
+                if !histogram[i].is_nan() {
+                    prev = histogram[i];
+                    break;
+                }
+            }
+            prev
         } else {
             0.0
         };
@@ -324,10 +321,7 @@ impl StrategyAnalyzer {
             sell_score += 1.0;
         }
 
-        // ============ DECISION LOGIC ============
-
-        let net_score = (buy_score - sell_score).abs();
-        let dominant_signal = if buy_score > sell_score { "buy" } else { "sell" };
+        // DECISION LOGIC
         let (signal, confidence) = if buy_score > sell_score + 1.5 {
             // Clear BUY signal with strong confidence
             if buy_score >= 4.5 {
@@ -385,14 +379,15 @@ impl StrategyAnalyzer {
             current_ema_long
         );
 
-        Ok(EnhancedTradingSignal {
+        Ok(TradingSignal::new(
+            symbol.to_string(),
             signal,
-            confidence: confidence.min(1.0),
+            confidence.min(1.0),
             indicators,
-            entry_price: current_price,
+            current_price,
             stop_loss,
             take_profit,
-        })
+        ))
     }
 
     /// Calculate Average True Range (ATR) for volatility

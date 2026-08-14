@@ -1,6 +1,3 @@
-mod binance_client;
-mod strategy;
-
 use anyhow::{anyhow, Result};
 use dotenvy::dotenv;
 use reqwest::Client;
@@ -12,15 +9,15 @@ use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 use tracing::{error, info, warn};
 
+mod binance_client;
+mod strategy;
+mod types;
 use crate::binance_client::RealBinanceClient;
 
-// ============ CONFIGURATION ============
-
+// CONFIGURATION 
 #[derive(Debug, Clone)]
 struct Config {
     rsi_period: usize,
-    rsi_oversold: f64,
-    rsi_overbought: f64,
     kline_limit: usize,
     request_timeout_secs: u64,
     rate_limit_secs: u64,
@@ -33,14 +30,6 @@ impl Config {
                 .unwrap_or_else(|_| "14".to_string())
                 .parse()
                 .unwrap_or(14),
-            rsi_oversold: std::env::var("RSI_OVERSOLD")
-                .unwrap_or_else(|_| "30".to_string())
-                .parse()
-                .unwrap_or(30.0),
-            rsi_overbought: std::env::var("RSI_OVERBOUGHT")
-                .unwrap_or_else(|_| "70".to_string())
-                .parse()
-                .unwrap_or(70.0),
             kline_limit: std::env::var("KLINE_LIMIT")
                 .unwrap_or_else(|_| "50".to_string())
                 .parse()
@@ -57,11 +46,6 @@ impl Config {
     }
 }
 
-// ============ DATA STRUCTURES ============
-
-#[derive(Debug, Deserialize)]
-struct BinanceKlineResponse(Vec<Vec<serde_json::Value>>);
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BinanceKline {
     open: f64,
@@ -69,22 +53,6 @@ struct BinanceKline {
     low: f64,
     close: f64,
     volume: f64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Action {
-    Buy,
-    Sell,
-    Hold,
-}
-
-#[derive(Debug, Clone)]
-struct TradingSignal {
-    symbol: String,
-    action: Action,
-    price: f64,
-    rsi: f64,
-    timestamp: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,8 +63,7 @@ struct Position {
     timestamp: i64,
 }
 
-// ============ TELEGRAM COMMANDS ============
-
+// TELEGRAM COMMANDS
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase")]
 enum Command {
@@ -110,8 +77,7 @@ enum Command {
     Help,
 }
 
-// ============ RATE LIMITER ============
-
+// RATE LIMITER
 #[derive(Clone)]
 struct RateLimiter {
     limits: Arc<tokio::sync::Mutex<HashMap<u64, SystemTime>>>,
@@ -162,7 +128,6 @@ impl TradingBot {
         dotenv().ok();
 
         let config = Config::from_env()?;
-        let telegram_token = std::env::var("TELEGRAM_BOT_TOKEN")?;
         let user_id = std::env::var("TELEGRAM_USER_ID")?
             .parse::<u64>()
             .map_err(|_| anyhow!("Invalid TELEGRAM_USER_ID format"))?;
@@ -255,12 +220,6 @@ impl TradingBot {
 
         Ok(klines)
     }
-
-    async fn get_balance_real(&self, asset: &str) -> Result<f64> {
-        let balance = self.real_binance.get_balance(asset).await?;
-        info!("Real balance - {}: {:.2}", asset, balance);
-        Ok(balance)
-    }
     
     async fn get_current_btc_price(&self) -> Result<f64> {
         let klines = self.get_klines("BTCUSDT").await?;
@@ -270,68 +229,8 @@ impl TradingBot {
             Err(anyhow!("No kline data available for BTC price"))
         }
     }
-
-    // ============ STRATEGY METHODS ============
-
-    fn calculate_rsi(close_prices: &[f64], period: usize) -> Result<Vec<f64>> {
-        if close_prices.len() < period + 1 {
-            return Err(anyhow!(
-                "Not enough data points for RSI calculation. Need {}, got {}",
-                period + 1,
-                close_prices.len()
-            ));
-        }
-
-        let mut rsi_values = Vec::with_capacity(close_prices.len() - period);
-        let mut gains = Vec::new();
-        let mut losses = Vec::new();
-
-        // Calculate price changes
-        for i in 1..close_prices.len() {
-            let change = close_prices[i] - close_prices[i - 1];
-            if change > 0.0 {
-                gains.push(change);
-                losses.push(0.0);
-            } else {
-                gains.push(0.0);
-                losses.push(-change);
-            }
-        }
-
-        let mut avg_gain = 0.0;
-        let mut avg_loss = 0.0;
-
-        // Initial average for first period
-        for i in 0..period {
-            avg_gain += gains[i];
-            avg_loss += losses[i];
-        }
-        avg_gain /= period as f64;
-        avg_loss /= period as f64;
-
-        // Calculate RSI values starting from period
-        for i in period..gains.len() {
-            avg_gain = (avg_gain * (period - 1) as f64 + gains[i]) / period as f64;
-            avg_loss = (avg_loss * (period - 1) as f64 + losses[i]) / period as f64;
-
-            let rsi = if avg_loss == 0.0 {
-                if avg_gain == 0.0 {
-                    50.0
-                } else {
-                    100.0
-                }
-            } else {
-                let rs = avg_gain / avg_loss;
-                100.0 - (100.0 / (1.0 + rs))
-            };
-
-            rsi_values.push(rsi);
-        }
-
-        Ok(rsi_values)
-    }
-
-    async fn analyze_strategy(&self) -> Result<TradingSignal> {
+    
+    async fn analyze_strategy(&self) -> Result<types::TradingSignal> {
         let klines = self.get_klines(&self.symbol).await?;
         
         // Convert to strategy module format
@@ -347,26 +246,12 @@ impl TradingBot {
             .collect();
             
         let config = strategy::StrategyConfig::default();
-        let enhanced_signal = strategy::StrategyAnalyzer::analyze(&kline_data, &config)?;
+        let trading_signal = strategy::StrategyAnalyzer::analyze(&self.symbol, &kline_data, &config)?;
         
-        let action = match enhanced_signal.signal {
-            strategy::StrategySignal::StrongBuy => Action::Buy,
-            strategy::StrategySignal::Buy => Action::Buy,
-            strategy::StrategySignal::Sell => Action::Sell,
-            strategy::StrategySignal::StrongSell => Action::Sell,
-            strategy::StrategySignal::Hold => Action::Hold,
-        };
-        Ok(TradingSignal {
-            symbol: self.symbol.clone(),
-            action,
-            price: enhanced_signal.entry_price,
-            rsi: enhanced_signal.indicators.rsi,
-            timestamp: chrono::Utc::now().timestamp(),
-        })
+        Ok(trading_signal)
     }
 
-    // ============ POSITION MANAGEMENT ============
-
+    // POSITION MANAGEMENT
     async fn add_position(&self, symbol: String, amount: f64, price: f64) -> Result<()> {
         let mut positions = self.positions.lock().await;
         positions.push(Position {
@@ -444,22 +329,31 @@ Total USDT Value: ~${:.2}"#,
 
     async fn handle_analyze(&self, msg: &Message) -> Result<()> {
         let signal = self.analyze_strategy().await?;
-        let action_str = match signal.action {
-            Action::Buy => "🟢 BUY",
-            Action::Sell => "🔴 SELL",
-            Action::Hold => "⏸️ HOLD",
+        let action_str = match signal.signal {
+            strategy::StrategySignal::StrongBuy => "🟢 STRONG BUY",
+            strategy::StrategySignal::Buy => "🟢 BUY",
+            strategy::StrategySignal::Sell => "🔴 SELL",
+            strategy::StrategySignal::StrongSell => "🔴 STRONG SELL",
+            strategy::StrategySignal::Hold => "⏸️ HOLD",
         };
-
+        
         let text = format!(
-            "📊 *Market Analysis*\n\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}\nSignal: {}",
-            signal.symbol, signal.price, signal.rsi, action_str
+            "📊 *Market Analysis*\n\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}\nMACD: {:.2}\nSignal: {}\nConfidence: {:.0}%\nStop Loss: ${:.2}\nTake Profit: ${:.2}",
+            self.symbol,
+            signal.entry_price,
+            signal.indicators.rsi,
+            signal.indicators.macd,
+            action_str,
+            signal.confidence * 100.0,
+            signal.stop_loss,
+            signal.take_profit
         );
-
+        
         self.telegram_bot
             .send_message(msg.chat.id, Self::escape_markdown(&text))
             .parse_mode(teloxide::types::ParseMode::MarkdownV2)
             .await?;
-
+        
         Ok(())
     }
 
@@ -471,7 +365,7 @@ Total USDT Value: ~${:.2}"#,
         
         // Get current BTC price
         let signal = self.analyze_strategy().await?;
-        let btc_amount = amount / signal.price;
+        let btc_amount = amount / signal.entry_price;
         
         // Check if you have enough USDT
         let usdt_balance = self.real_binance.get_usdt_balance().await?;
@@ -487,9 +381,9 @@ Total USDT Value: ~${:.2}"#,
         let order_id = self.real_binance.place_market_buy(&self.symbol, btc_amount).await?;
         
         // Add to positions
-        self.add_position(self.symbol.clone(), btc_amount, signal.price).await?;
+        self.add_position(self.symbol.clone(), btc_amount, signal.entry_price).await?;
         
-        info!("✅ REAL BUY executed! Order ID: {}", order_id);
+        info!(" REAL BUY executed! Order ID: {}", order_id);
         
         let text = format!(
             r#"✅ *Real Buy Order Filled!*
@@ -502,7 +396,7 @@ Order ID: {}
             self.symbol,
             btc_amount,
             amount,
-            signal.price,
+            signal.entry_price,
             order_id
         );
 
@@ -523,11 +417,10 @@ Order ID: {}
         let signal = self.analyze_strategy().await?;
 
         info!("SELL order placed - Symbol: {}, Amount: {:.2}, Price: ${:.2}", 
-              self.symbol, amount, signal.price);
-
+              self.symbol, amount, signal.entry_price);
         let text = format!(
             "✅ *Sell Order*\nAmount: {:.2} USDT\nSymbol: {}\nPrice: ${:.2}",
-            amount, self.symbol, signal.price
+            amount, self.symbol, signal.entry_price
         );
 
         self.telegram_bot
@@ -679,18 +572,18 @@ async fn auto_trading_loop(bot: Arc<TradingBot>, chat_id: ChatId) -> Result<()> 
     loop {
         match bot.analyze_strategy().await {
             Ok(signal) => {
-                match signal.action {
-                    Action::Buy => {
+                match signal.signal {
+                    strategy::StrategySignal::StrongBuy | strategy::StrategySignal::Buy => {
                         info!(
                             "🔵 BUY signal detected - Symbol: {}, Price: ${:.2}, RSI: {:.2}",
-                            signal.symbol, signal.price, signal.rsi
+                            signal.symbol, signal.entry_price, signal.indicators.rsi
                         );
-
+                        
                         let text = format!(
                             "🚀 *AUTO BUY*\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}",
-                            signal.symbol, signal.price, signal.rsi
+                            signal.symbol, signal.entry_price, signal.indicators.rsi
                         );
-
+                        
                         if let Err(e) = bot
                             .telegram_bot
                             .send_message(chat_id, TradingBot::escape_markdown(&text))
@@ -699,33 +592,34 @@ async fn auto_trading_loop(bot: Arc<TradingBot>, chat_id: ChatId) -> Result<()> 
                         {
                             error!("Failed to send buy signal: {}", e);
                         }
-
-                        // Execute buy logic here
-                        if let Err(e) = bot.add_position(signal.symbol, bot.position_size, signal.price).await {
+                        
+                        if let Err(e) = bot.add_position(signal.symbol.clone(), bot.position_size, signal.entry_price).await {
                             error!("Failed to add position: {}", e);
                         }
                     }
-                    Action::Sell => {
+                    
+                    strategy::StrategySignal::Sell | strategy::StrategySignal::StrongSell => {
                         info!(
                             "🔴 SELL signal detected - Symbol: {}, Price: ${:.2}, RSI: {:.2}",
-                            signal.symbol, signal.price, signal.rsi
+                            signal.symbol, signal.entry_price, signal.indicators.rsi
                         );
-
+                        
                         let text = format!(
                             "📉 *AUTO SELL*\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}",
-                            signal.symbol, signal.price, signal.rsi
+                            signal.symbol, signal.entry_price, signal.indicators.rsi
                         );
-
+                        
                         let _ = bot
                             .telegram_bot
                             .send_message(chat_id, TradingBot::escape_markdown(&text))
                             .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                             .await;
                     }
-                    Action::Hold => {
+                    
+                    strategy::StrategySignal::Hold => {
                         info!(
                             "⏸️ HOLD - RSI: {:.2} is within range",
-                            signal.rsi
+                            signal.indicators.rsi
                         );
                     }
                 }
