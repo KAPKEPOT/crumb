@@ -64,18 +64,51 @@ impl RealBinanceClient {
         })
     }
     
+    /// Generate HMAC-SHA256 signature for authenticated requests
+    fn generate_signature(&self, params: &[(&str, String)]) -> Result<String> {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        
+        // Build query string from params
+        let query_string = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        
+        // Create HMAC-SHA256 signature
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.api_secret.as_bytes())
+            .map_err(|e| anyhow!("Failed to create HMAC: {}", e))?;
+        mac.update(query_string.as_bytes());
+        Ok(hex::encode(mac.finalize().into_bytes()))
+    }
+    
     /// Get account information (balances, trading status)
     pub async fn get_account(&self) -> Result<AccountInfo> {
         let endpoint = format!("{}/api/v3/account", self.base_url);
         
+        // Build parameters
+        let timestamp = chrono::Local::now().timestamp_millis().to_string();
+        let params = vec![
+            ("timestamp", timestamp),
+        ];
+        
+        // Generate signature
+        let signature = self.generate_signature(&params)?;
+        
+        // Build URL with all params
+        let mut url = format!("{}?", endpoint);
+        for (k, v) in &params {
+            url.push_str(&format!("{}={}&", k, urlencoding::encode(v)));
+        }
+        url.push_str(&format!("signature={}", signature));
+        
         let response = self
             .client
-            .get(&endpoint)
+            .get(&url)
             .header("X-MBX-APIKEY", &self.api_key)
             .send()
-            .await
             .map_err(|e| anyhow!("Failed to fetch account: {}", e))?;
-
         if !response.status().is_success() {
             return Err(anyhow!(
                 "Binance API error [{}]: {}",
@@ -83,13 +116,12 @@ impl RealBinanceClient {
                 response.text().await.unwrap_or_default()
             ));
         }
-
+        
         let account_info = response
             .json::<AccountInfo>()
             .await
             .map_err(|e| anyhow!("Failed to parse account response: {}", e))?;
-
-        info!("✅ Account fetched successfully");
+        info!("Account fetched successfully");
         Ok(account_info)
     }
     
@@ -134,19 +166,28 @@ impl RealBinanceClient {
         let endpoint = format!("{}/api/v3/order", self.base_url);
         
         // Build query params
-        let params = [
+        let timestamp = chrono::Local::now().timestamp_millis().to_string();
+        let quantity_str = quantity.to_string();
+        let params = vec![
             ("symbol", symbol.to_string()),
             ("side", side.to_string()),
             ("type", "MARKET".to_string()),
             ("quantity", quantity.to_string()),
             ("timestamp", chrono::Local::now().timestamp_millis().to_string()),
         ];
+        
+        // Generate signature
+        let signature = self.generate_signature(&params)?;
+        
+        // Build request body with signature
+        let mut body_params = params.clone();
+        body_params.push(("signature", signature));
 
         let response = self
             .client
             .post(&endpoint)
             .header("X-MBX-APIKEY", &self.api_key)
-            .form(&params)
+            .form(&body_params)
             .send()
             .await
             .map_err(|e| anyhow!("Failed to place {} order: {}", side, e))?;
