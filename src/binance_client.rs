@@ -108,6 +108,7 @@ impl RealBinanceClient {
             .get(&url)
             .header("X-MBX-APIKEY", &self.api_key)
             .send()
+            .await
             .map_err(|e| anyhow!("Failed to fetch account: {}", e))?;
         if !response.status().is_success() {
             return Err(anyhow!(
