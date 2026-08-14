@@ -59,8 +59,8 @@ impl Config {
 
 // ============ DATA STRUCTURES ============
 
-#[derive(Debug, Deserialize)]
-struct BinanceKlineResponse(Vec<Vec<serde_json::Value>>);
+// #[derive(Debug, Deserialize)]
+// struct BinanceKlineResponse(Vec<Vec<serde_json::Value>>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BinanceKline {
@@ -84,7 +84,7 @@ struct TradingSignal {
     action: Action,
     price: f64,
     rsi: f64,
-    timestamp: i64,
+    // timestamp: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,8 +95,7 @@ struct Position {
     timestamp: i64,
 }
 
-// ============ TELEGRAM COMMANDS ============
-
+// TELEGRAM COMMANDS
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase")]
 enum Command {
@@ -110,8 +109,7 @@ enum Command {
     Help,
 }
 
-// ============ RATE LIMITER ============
-
+// RATE LIMITER
 #[derive(Clone)]
 struct RateLimiter {
     limits: Arc<tokio::sync::Mutex<HashMap<u64, SystemTime>>>,
@@ -162,7 +160,6 @@ impl TradingBot {
         dotenv().ok();
 
         let config = Config::from_env()?;
-        let telegram_token = std::env::var("TELEGRAM_BOT_TOKEN")?;
         let user_id = std::env::var("TELEGRAM_USER_ID")?
             .parse::<u64>()
             .map_err(|_| anyhow!("Invalid TELEGRAM_USER_ID format"))?;
@@ -270,67 +267,7 @@ impl TradingBot {
             Err(anyhow!("No kline data available for BTC price"))
         }
     }
-
-    // ============ STRATEGY METHODS ============
-
-    fn calculate_rsi(close_prices: &[f64], period: usize) -> Result<Vec<f64>> {
-        if close_prices.len() < period + 1 {
-            return Err(anyhow!(
-                "Not enough data points for RSI calculation. Need {}, got {}",
-                period + 1,
-                close_prices.len()
-            ));
-        }
-
-        let mut rsi_values = Vec::with_capacity(close_prices.len() - period);
-        let mut gains = Vec::new();
-        let mut losses = Vec::new();
-
-        // Calculate price changes
-        for i in 1..close_prices.len() {
-            let change = close_prices[i] - close_prices[i - 1];
-            if change > 0.0 {
-                gains.push(change);
-                losses.push(0.0);
-            } else {
-                gains.push(0.0);
-                losses.push(-change);
-            }
-        }
-
-        let mut avg_gain = 0.0;
-        let mut avg_loss = 0.0;
-
-        // Initial average for first period
-        for i in 0..period {
-            avg_gain += gains[i];
-            avg_loss += losses[i];
-        }
-        avg_gain /= period as f64;
-        avg_loss /= period as f64;
-
-        // Calculate RSI values starting from period
-        for i in period..gains.len() {
-            avg_gain = (avg_gain * (period - 1) as f64 + gains[i]) / period as f64;
-            avg_loss = (avg_loss * (period - 1) as f64 + losses[i]) / period as f64;
-
-            let rsi = if avg_loss == 0.0 {
-                if avg_gain == 0.0 {
-                    50.0
-                } else {
-                    100.0
-                }
-            } else {
-                let rs = avg_gain / avg_loss;
-                100.0 - (100.0 / (1.0 + rs))
-            };
-
-            rsi_values.push(rsi);
-        }
-
-        Ok(rsi_values)
-    }
-
+    
     async fn analyze_strategy(&self) -> Result<TradingSignal> {
         let klines = self.get_klines(&self.symbol).await?;
         
@@ -442,7 +379,7 @@ Total USDT Value: ~${:.2}"#,
         Ok(())
     }
 
-    async fn handle_analyze(&self, msg: &Message) -> Result<()> {
+    async fn  handle_analyze(&self, msg: &Message) -> Result<()> {
         let signal = self.analyze_strategy().await?;
         let action_str = match signal.action {
             Action::Buy => "🟢 BUY",
@@ -451,8 +388,8 @@ Total USDT Value: ~${:.2}"#,
         };
 
         let text = format!(
-            "📊 *Market Analysis*\n\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}\nSignal: {}",
-            signal.symbol, signal.price, signal.rsi, action_str
+            "📊 *Market Analysis*\n\nSymbol: {}\nPrice: ${:.2}\nRSI: {:.2}\nSignal: {}\nConfidence: {:.0}%\nStop Loss: ${:.2}\nTake Profit: ${:.2}",
+            signal.symbol, signal.price, signal.rsi, action_str, signal.confidence * 100.0, signal.stop_loss, signal.take_profit
         );
 
         self.telegram_bot

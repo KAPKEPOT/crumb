@@ -173,8 +173,8 @@ impl RealBinanceClient {
             ("symbol", symbol.to_string()),
             ("side", side.to_string()),
             ("type", "MARKET".to_string()),
-            ("quantity", quantity.to_string()),
-            ("timestamp", chrono::Local::now().timestamp_millis().to_string()),
+            ("quantity", quantity_str),
+            ("timestamp", timestamp),
         ];
         
         // Generate signature

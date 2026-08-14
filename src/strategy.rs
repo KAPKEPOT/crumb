@@ -221,12 +221,12 @@ impl StrategyAnalyzer {
         let volumes: Vec<f64> = klines.iter().map(|k| k.volume).collect();
 
         // Calculate all indicators
-        let rsi_values = Self::calculate_rsi(&closes, 14)?;
+        let rsi_values = Self::calculate_rsi(&closes, config.rsi_period)?;
         let (macd_line, signal_line, histogram) = Self::calculate_macd(&closes)?;
-        let ema_short = Self::calculate_ema(&closes, 9)?;
-        let ema_long = Self::calculate_ema(&closes, 21)?;
-        let (bb_upper, bb_middle, bb_lower) = Self::calculate_bollinger_bands(&closes, 20, 2.0)?;
-        let volume_sma = Self::calculate_volume_sma(&volumes, 20)?;
+        let ema_short = Self::calculate_ema(&closes, config.ema_short)?;
+        let ema_long = Self::calculate_ema(&closes, config.ema_long)?;
+        let (bb_upper, bb_middle, bb_lower) = Self::calculate_bollinger_bands(&closes, config.bb_period, 2.0)?;
+        let volume_sma = Self::calculate_volume_sma(&volumes, config.volume_period)?;
 
         // Get current values
         let current_rsi = *rsi_values.last().ok_or_else(|| anyhow!("No RSI data"))?;
@@ -324,10 +324,7 @@ impl StrategyAnalyzer {
             sell_score += 1.0;
         }
 
-        // ============ DECISION LOGIC ============
-
-        let net_score = (buy_score - sell_score).abs();
-        let dominant_signal = if buy_score > sell_score { "buy" } else { "sell" };
+        // DECISION LOGIC
         let (signal, confidence) = if buy_score > sell_score + 1.5 {
             // Clear BUY signal with strong confidence
             if buy_score >= 4.5 {
