@@ -27,7 +27,7 @@ pub struct TechnicalIndicators {
     pub volume_sma: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum StrategySignal {
     StrongBuy,
     Buy,

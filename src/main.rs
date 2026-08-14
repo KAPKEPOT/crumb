@@ -13,9 +13,9 @@ mod binance_client;
 mod strategy;
 mod types;
 use crate::binance_client::RealBinanceClient;
+use crate::types::TradingSignal;
 
-// ============ CONFIGURATION ============
-
+// CONFIGURATION 
 #[derive(Debug, Clone)]
 struct Config {
     rsi_period: usize,
@@ -265,16 +265,7 @@ impl TradingBot {
         let config = strategy::StrategyConfig::default();
         let trading_signal = strategy::StrategyAnalyzer::analyze(&self.symbol, &kline_data, &config)?;
         
-        Ok(TradingSignal {
-            symbol: self.symbol.clone(),
-            signal: enhanced_signal.signal,
-            entry_price: enhanced_signal.entry_price,
-            indicators: enhanced_signal.indicators,
-            confidence: enhanced_signal.confidence,
-            stop_loss: enhanced_signal.stop_loss,
-            take_profit: enhanced_signal.take_profit,
-            timestamp: chrono::Utc::now().timestamp(),
-        })
+        Ok(trading_signal)
     }
 
     // POSITION MANAGEMENT
